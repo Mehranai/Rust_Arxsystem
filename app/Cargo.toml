@@ -1,0 +1,30 @@
+[package]
+name = "arz_axum_for_services"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+axum = "0.8.7"
+bitcoincore-rpc = "0.19.0"
+chrono = { version = "0.4.42", features = ["serde"] }
+clickhouse = { version = "0.14.1" , features= ["native-tls"]}
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.20"
+config = "0.15.19"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+futures = "0.3.31"
+neo4rs = "0.5"
+nanoid = "0.4"
+ethers = { version = "2.0.14", features = ["abigen", "rustls"] }
+ethers-contract = "2.0.14"
+ethers-core = "2.0.14"
+ethers-providers = "2.0.14"
+
+bs58 = "0.5"
+sha2 = "0.10"
+hex = "0.4"

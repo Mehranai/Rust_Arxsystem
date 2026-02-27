@@ -1,0 +1,72 @@
+version: "3.8"
+
+services:
+  bsc-snapshot-init:
+    image: alpine:latest
+    container_name: bsc-snapshot-init
+    volumes:
+      - ./data/bsc:/data
+    command: >
+      sh -c "
+      if [ ! -d '/data/geth/chaindata' ]; then
+        echo ' ---- Downloading BSC ARCHIVE snapshot...';
+        apk add --no-cache wget tar aria2;
+        cd /tmp;
+        
+        echo ' ---- Fetching latest archive snapshot URL...';
+        SNAPSHOT_URL='!!!!!! LInk haro bayad peyda konam';
+        
+        echo ' ---- Downloading (this will take several hours)...';
+        aria2c -x 16 -s 16 -k 1M -o archive.tar.lz4 $$SNAPSHOT_URL;
+        
+        echo ' ---- Extracting archive snapshot...';
+        apk add --no-cache lz4;
+        lz4 -d archive.tar.lz4 | tar -xv -C /data;
+        
+        rm archive.tar.lz4;
+        echo ' ---- Archive snapshot ready';
+      else
+        echo ' ---- Archive data already exists';
+      fi
+      "
+    networks:
+      - blockchain-net
+
+  bsc-geth:
+    image: ghcr.io/bnb-chain/bsc:latest
+    container_name: bsc-geth
+    depends_on:
+      bsc-snapshot-init:
+        condition: service_completed_successfully
+    command:
+      - --datadir=/data
+      - --syncmode=full
+      - --gcmode=archive
+      - --txlookuplimit=0
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.port=8545
+      - --http.api=eth,net,web3,debug,trace,txpool,admin
+      - --http.vhosts=*
+      - --http.corsdomain=*
+      - --ws
+      - --ws.addr=0.0.0.0
+      - --ws.port=8546
+      - --ws.api=eth,net,web3,debug,trace,txpool
+      - --ws.origins=*
+      - --maxpeers=100
+      - --snapshot=false
+    volumes:
+      - ./data/bsc:/data
+    ports:
+      - "8545:8545"
+      - "8546:8546"
+      - "30303:30303"
+      - "30303:30303/udp"
+    restart: unless-stopped
+    networks:
+      - blockchain-net
+
+networks:
+  blockchain-net:
+    external: true

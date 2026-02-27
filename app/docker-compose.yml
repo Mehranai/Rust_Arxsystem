@@ -1,0 +1,22 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: clickhouse
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: mehran.admin
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    networks:
+      - blockchain-net
+
+volumes:
+  clickhouse_data:
+
+networks:
+  blockchain-net:
+    external: true

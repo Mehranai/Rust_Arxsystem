@@ -1,0 +1,14 @@
+[Node]
+DataDir = "/data"
+
+HTTPHost = "0.0.0.0"
+HTTPPort = 8545
+HTTPModules = ["eth","net","web3","debug","trace","txpool"]
+
+WSHost = "0.0.0.0"
+WSPort = 8546
+WSModules = ["eth","net","web3","debug","trace","txpool"]
+
+[Eth]
+SyncMode = "full"
+TrieTimeout = 0

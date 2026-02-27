@@ -1,0 +1,83 @@
+version: "3.8"
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: clickhouse
+    volumes:
+      - ./ch-data:/var/lib/clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: mehran.admin
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+    networks:
+      - blockchain-net 
+      
+  rust-app:
+    build: .
+    container_name: rust-app
+
+    restart: unless-stopped
+
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+    environment:
+      # ===== App Mode =====
+      APP_MODE: ${APP_MODE}
+      SYNC_MODE: auto
+
+      # ===== ClickHouse =====
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: mehran.admin
+
+      CLICKHOUSE_DB_BTC: btc_db
+      CLICKHOUSE_DB_ETH: eth_db
+      CLICKHOUSE_DB_BSC: bsc_db
+
+      # ===== BTC =====
+      BTC_API_URL: https://blockstream.info/api
+      BTC_START_BLOCK: 831000
+      TOTAL_BTC_TXS: 500
+
+      # ===== ETH (Reth Node) =====
+      ETH_RPC_HTTP: http://reth:8545
+      ETH_START_BLOCK: 1
+      TOTAL_ETH_TXS: 300
+
+      # ===== BSC =====
+      BSC_RPC_HTTP: http://bsc-node:8545
+      BSC_START_BLOCK: 1500000
+      TOTAL_BSC_TXS: 300
+
+      # ===== RPC Controls =====
+      RPC_TIMEOUT_SECONDS: 120
+      RPC_MAX_CONCURRENCY: 10
+
+      # ===== Tokio / Performance =====
+      RUST_LOG: info
+      RUST_BACKTRACE: 1
+
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    networks:
+      - blockchain-net
+
+networks:
+  blockchain-net:
+    external: true
