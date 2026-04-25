@@ -1,59 +1,77 @@
-use anyhow::Result;
-use reqwest::Client;
+use anyhow::{anyhow, Context, Result};
+use reqwest::{Client, StatusCode};
 use serde_json::Value;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct TronClient {
-    pub client: Client,
-    pub base_url: String,
-    pub api_key: Option<String>,
+    client: Client,
+    base_url: String,
+    api_key: Option<String>,
 }
 
 impl TronClient {
-    pub fn new(base_url: &str, api_key: Option<String>) -> Self {
-        Self {
-            client: Client::new(),
-            base_url: base_url.to_string(),
+    pub fn new(base_url: &str, api_key: Option<String>) -> Result<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(15))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .context("Failed to build reqwest client")?;
+
+        Ok(Self {
+            client,
+            base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
-        }
+        })
     }
 
     async fn post(&self, endpoint: &str, body: Value) -> Result<Value> {
         let url = format!("{}/{}", self.base_url, endpoint);
 
-        let mut req = self.client.post(url).json(&body);
+        let mut request = self.client.post(&url).json(&body);
 
         if let Some(key) = &self.api_key {
-            req = req.header("TRON-PRO-API-KEY", key);
+            request = request.header("TRON-PRO-API-KEY", key);
         }
 
-        let resp = req.send().await?;
-        // changed for test
-        //Ok(resp.json().await?)
-        
-        let status = resp.status();
-        let text = resp.text().await?;
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("HTTP request failed: {}", endpoint))?;
+
+        let status = response.status();
+        let text = response.text().await?;
 
         if !status.is_success() {
-            println!("HTTP ERROR {} : {}", status, text);
-            return Ok(serde_json::json!({}));
+            return Err(anyhow!(
+                "Tron API error | endpoint={} | status={} | body={}",
+                endpoint,
+                status,
+                text
+            ));
         }
 
         let parsed: Value = serde_json::from_str(&text)
-            .unwrap_or_else(|_| {
-                println!("INVALID JSON: {}", text);
-                serde_json::json!({})
-            });
+            .with_context(|| format!("Invalid JSON from endpoint: {}", endpoint))?;
 
         Ok(parsed)
     }
 
+    // --------------------------------------------------
+    // PUBLIC API METHODS
+    // --------------------------------------------------
+
     pub async fn get_block(&self, number: u64) -> Result<Value> {
-        self.post("wallet/getblockbynum", serde_json::json!({ "num": number })).await
+        self.post(
+            "wallet/getblockbynum",
+            serde_json::json!({ "num": number }),
+        )
+        .await
     }
 
     pub async fn get_now_block(&self) -> Result<Value> {
-        self.post("wallet/getnowblock", serde_json::json!({})).await
+        self.post("wallet/getnowblock", serde_json::json!({}))
+            .await
     }
 
     pub async fn get_tx_receipt(&self, tx_hash: &str) -> Result<Value> {
@@ -67,20 +85,19 @@ impl TronClient {
     pub async fn get_account(&self, address: &str) -> Result<Value> {
         self.post(
             "wallet/getaccount",
-            serde_json::json!({ "address": address, "visible": true }),
+            serde_json::json!({
+                "address": address,
+                "visible": true
+            }),
         )
         .await
     }
 
-    // this one is new
     pub async fn get_block_number(&self) -> Result<u64> {
         let block = self.get_now_block().await?;
 
-        Ok(
-            block["block_header"]["raw_data"]["number"]
-                .as_u64()
-                .unwrap_or(0)
-        )
+        block["block_header"]["raw_data"]["number"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("Failed to parse block number"))
     }
 }
-

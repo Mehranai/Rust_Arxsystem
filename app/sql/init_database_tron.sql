@@ -1,198 +1,168 @@
 CREATE DATABASE IF NOT EXISTS tron_db;
 
 ---------------------------------------------------------
--- WALLET INFO
+-- BLOCKS
 ---------------------------------------------------------
-CREATE TABLE tron_db.wallet_info
+
+CREATE TABLE IF NOT EXISTS tron_db.blocks
 (
-    address String,
-    balance Int64,                     -- TRX in SUN
-    wallet_type LowCardinality(String), -- wallet / exchange / smart_contract
-    person_id String,
-    inserted_at DateTime DEFAULT now()
+    block_number UInt64,
+    block_hash String,
+    parent_hash String,
+
+    tx_count UInt32,
+    block_timestamp DateTime,
+
+    producer_address String,
+
+    created_at DateTime DEFAULT now()
 )
-ENGINE = ReplacingMergeTree(inserted_at)
-ORDER BY address
-SETTINGS compression_codec = 'ZSTD(3)';
+ENGINE = MergeTree()
+ORDER BY block_number;
+
 
 ---------------------------------------------------------
 -- TRANSACTIONS (Native TRX)
 ---------------------------------------------------------
-CREATE TABLE tron_db.transactions
+
+CREATE TABLE IF NOT EXISTS tron_db.transactions
 (
-    hash String,
+    tx_hash String,
+
     block_number UInt64,
-    block_time DateTime,
-    from_addr String,
-    to_addr String,
-    value Int64,                     -- TRX in SUN
-    sensitivity UInt8,
-    inserted_at DateTime DEFAULT now()
+    block_timestamp DateTime,
+
+    from_address String,
+    to_address String,
+
+    amount UInt64,
+
+    fee UInt64,
+    energy_usage UInt64,
+    bandwidth_usage UInt64,
+
+    success UInt8,
+
+    created_at DateTime DEFAULT now()
 )
 ENGINE = MergeTree()
-PARTITION BY intDiv(block_number, 5_000_000)
-ORDER BY (from_addr, block_number, hash)
-SETTINGS compression_codec = 'ZSTD(3)';
+ORDER BY (block_number, tx_hash);
+
 
 ---------------------------------------------------------
--- OWNER INFO
+-- TRC20 TOKEN TRANSFERS
 ---------------------------------------------------------
-CREATE TABLE tron_db.owner_info
+
+CREATE TABLE IF NOT EXISTS tron_db.token_transfers
 (
-    address String,
-    person_name String,
-    person_id String,
-    personal_id UInt16,
-    inserted_at DateTime DEFAULT now()
+    tx_hash String,
+    log_index UInt32,
+
+    block_number UInt64,
+    block_timestamp DateTime,
+
+    contract_address String,
+
+    from_address String,
+    to_address String,
+
+    amount UInt256,
+
+    created_at DateTime DEFAULT now()
 )
-ENGINE = ReplacingMergeTree(inserted_at)
-ORDER BY address;
+ENGINE = MergeTree()
+ORDER BY (contract_address, block_number);
+
 
 ---------------------------------------------------------
--- ADDRESS TAGS
+-- CONTRACT CALLS (برای تحلیل رفتار قراردادها)
 ---------------------------------------------------------
-CREATE TABLE tron_db.address_tags
+
+CREATE TABLE IF NOT EXISTS tron_db.contract_calls
+(
+    tx_hash String,
+
+    block_number UInt64,
+    block_timestamp DateTime,
+
+    caller_address String,
+    contract_address String,
+
+    method_id FixedString(8),
+
+    call_value UInt64,
+    success UInt8,
+
+    created_at DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY (contract_address, block_number);
+
+
+---------------------------------------------------------
+-- TOKEN METADATA
+---------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS tron_db.token_metadata
+(
+    contract_address String,
+
+    name String,
+    symbol String,
+    decimals UInt8,
+
+    total_supply UInt256,
+
+    created_at DateTime DEFAULT now(),
+    updated_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY contract_address;
+
+
+---------------------------------------------------------
+-- ADDRESS ENTITY TAGGING
+---------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS tron_db.address_tags
 (
     address String,
-    tag String,
+
+    tag LowCardinality(String),      -- exchange | mixer | defi | bridge | scam
+    source LowCardinality(String),   -- manual | chainalysis | internal
+    risk_score UInt8,
+
     created_at DateTime DEFAULT now()
 )
 ENGINE = MergeTree()
 ORDER BY (address, tag);
 
----------------------------------------------------------
--- TRC20 TRANSFERS (Canonical)
----------------------------------------------------------
-CREATE TABLE tron_db.token_transfers
-(
-    tx_hash String,
-    block_number UInt64,
-    block_time DateTime,
-    log_index UInt32,
-    token_address String,
-    from_addr String,
-    to_addr String,
-    amount Int256
-)
-ENGINE = MergeTree()
-PARTITION BY intDiv(block_number, 5_000_000)
-ORDER BY (from_addr, token_address, block_number)
-SETTINGS compression_codec = 'ZSTD(3)';
 
 ---------------------------------------------------------
--- SNAPSHOT BALANCES (Monthly)
+-- DERIVED BALANCES (برای سریع گرفتن موجودی)
 ---------------------------------------------------------
-CREATE TABLE tron_db.address_token_balance_snapshot
+
+CREATE TABLE IF NOT EXISTS tron_db.address_token_balances
 (
-    snapshot_month Date,
     address String,
-    token_address String,
-    balance Int256
-)
-ENGINE = ReplacingMergeTree()
-PARTITION BY toYYYYMM(snapshot_month)
-ORDER BY (address, token_address);
+    contract_address String,
 
----------------------------------------------------------
--- TOKEN META DATA
----------------------------------------------------------
-CREATE TABLE tron_db.token_metadata
-(
-    token_address String,
-    name String,
-    symbol String,
-    decimals UInt8,
-    total_supply Int256,
-    is_verified UInt8,
-    created_at DateTime DEFAULT now(),
+    balance UInt256,
+
     updated_at DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY token_address;
+ORDER BY (address, contract_address);
+
 
 ---------------------------------------------------------
 -- SYNC STATE
 ---------------------------------------------------------
-CREATE TABLE tron_db.sync_state
+
+CREATE TABLE IF NOT EXISTS tron_db.sync_state
 (
-    chain String,
     last_synced_block UInt64,
     updated_at DateTime DEFAULT now()
 )
 ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY chain;
-
----------------------------------------------------------
--- ADDRESS ENERGY USAGE (AML / Behavior Analysis)
----------------------------------------------------------
-CREATE TABLE tron_db.address_energy_usage
-(
-    address String,
-    block_number UInt64,
-    energy_usage UInt64,
-    energy_fee UInt64,
-    net_usage UInt64,
-    net_fee UInt64,
-    tx_hash String,
-    inserted_at DateTime DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(inserted_at)
-ORDER BY (address, block_number, tx_hash);
-
----------------------------------------------------------
--- CONTRACT CALLS (Smart Contract Trace Layer)
----------------------------------------------------------
-CREATE TABLE tron_db.contract_calls
-(
-    tx_hash String,
-    block_number UInt64,
-    caller_address String,
-    contract_address String,
-    contract_type LowCardinality(String),        -- TriggerSmartContract / CreateSmartContract
-    method_signature String,                     -- optional decoded method
-    call_value Int64,                            -- SUN
-    energy_used UInt64,
-    result LowCardinality(String),               -- SUCCESS / REVERT
-    inserted_at DateTime DEFAULT now()
-)
-ENGINE = ReplacingMergeTree(inserted_at)
-ORDER BY (block_number, tx_hash, contract_address);
-
----------------------------------------------------------
--- RAW LOGS (Sliding Window Only)
----------------------------------------------------------
-CREATE TABLE tron_db.raw_logs
-(
-    tx_hash String,
-    block_number UInt64,
-    block_time DateTime,
-    log_index UInt32,
-    contract_address String,
-    topic0 String,
-    topic1 String,
-    topic2 String,
-    topic3 String,
-    data String
-)
-ENGINE = MergeTree()
-PARTITION BY intDiv(block_number, 5_000_000)
-ORDER BY (block_number, tx_hash, log_index)
-TTL block_time + INTERVAL 14 DAY DELETE;
-
----------------------------------------------------------
--- CLASSIFIED EVENTS (Swap / Bridge / LP / Mint / Burn)
----------------------------------------------------------
-CREATE TABLE tron_db.classified_events
-(
-    tx_hash String,
-    block_number UInt64,
-    block_time DateTime,
-    event_type LowCardinality(String),          -- swap | mint | burn | bridge | lp_add | lp_remove | unknown
-    primary_address String,
-    secondary_address String,
-    token_address String,
-    amount Int256
-)
-ENGINE = MergeTree()
-PARTITION BY intDiv(block_number, 5_000_000)
-ORDER BY (primary_address, block_number);
+ORDER BY tuple();
