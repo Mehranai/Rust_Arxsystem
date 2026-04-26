@@ -1,208 +1,305 @@
 use std::sync::Arc;
-use anyhow::Result;
+
+use anyhow::{Result, anyhow};
 use futures::stream::{FuturesUnordered, StreamExt};
-use serde_json::Value;
 
 use crate::services::loader::LoaderTron;
 use crate::services::progress::{
     save_sync_state,
-    save_tx,
-    save_token_transfer,
-    save_contract_call,
 };
+use crate::models::transaction::TransactionRow;
 use crate::models::token_transfer::TokenTransferRow;
-use crate::models::tron_raw_log::TronRawLogRow;
-use crate::models::tron_classify_event::TronClassifiedEventRow;
-use crate::utils::tron_address::normalize_tron_address;
 
-const ZERO_ADDRESS: &str = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb";
-const TRC20_TRANSFER_SIG: &str =
-    "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a9df523b3ef";
+const TRC20_TRANSFER_TOPIC: &str =
+    "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
-/// محاسبه حساسیت تراکنش TRX
-fn calc_sensivity_trx(sun: u64) -> u8 {
-    let trx = sun as f64 / 1_000_000.0;
-    if trx > 100_000.0 { 2 }
-    else if trx > 10_000.0 { 1 }
-    else { 0 }
+// -------------------------------------
+// Sensitivity (basic version)
+// -------------------------------------
+fn calc_sensivity_tron(amount: u128) -> u8 {
+    if amount > 10_000_000_000 { // ~10k USDT (6 decimals)
+        2
+    } else if amount > 1_000_000_000 {
+        1
+    } else {
+        0
+    }
 }
 
-/// دیکد کردن TRC20 transfer از receipt
-fn decode_trc20_from_receipt(
-    receipt: &Value,
-) -> Vec<(u32, String, String, String, String)> {
+// -------------------------------------
+// Address normalize (HEX -> base58 later)
+// -------------------------------------
+fn normalize_address(addr: &str) -> String {
+    addr.to_string() // TODO: convert hex → base58
+}
 
-    let mut transfers = Vec::new();
-    let logs = receipt["log"].as_array().cloned().unwrap_or_default();
+// -------------------------------------
+// Extract TRC20 logs
+// -------------------------------------
+fn extract_trc20_transfers(
+    receipt: &serde_json::Value,
+    block_number: u64,
+    tx_hash: &str,
+) -> Vec<TokenTransferRow> {
 
-    for (idx, log) in logs.into_iter().enumerate() {
-        let topics = log["topics"].as_array().cloned().unwrap_or_default();
-        if topics.len() < 3 { continue; }
+    let mut result = vec![];
 
-        let topic0 = topics[0]
-            .as_str()
-            .unwrap_or("")
-            .trim_start_matches("0x")
-            .to_lowercase();
+    let logs: &[serde_json::Value] = receipt["log"]
+        .as_array()
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
 
-        if topic0 != TRC20_TRANSFER_SIG { continue; }
+    for (i, log) in logs.iter().enumerate() {
+        let topics = log["topics"].as_array();
+        if topics.is_none() {
+            continue;
+        }
 
-        let token_address = log["address"].as_str().unwrap_or("").to_string();
+        let topics = topics.unwrap();
 
-        let from = topics[1]
-            .as_str()
-            .unwrap_or("")
-            .trim_start_matches("0x")
-            .trim_start_matches("000000000000000000000000")
-            .to_string();
+        if topics.len() < 3 {
+            continue;
+        }
 
-        let to = topics[2]
-            .as_str()
-            .unwrap_or("")
-            .trim_start_matches("0x")
-            .trim_start_matches("000000000000000000000000")
-            .to_string();
+        let topic0 = topics[0].as_str().unwrap_or("");
 
-        let value_hex = log["data"]
-            .as_str()
-            .unwrap_or("0x0")
-            .trim_start_matches("0x");
+        if !topic0.contains(TRC20_TRANSFER_TOPIC) {
+            continue;
+        }
 
-        let amount = u128::from_str_radix(value_hex, 16)
-            .unwrap_or(0)
-            .to_string();
+        let from = topics[1].as_str().unwrap_or("").to_string();
+        let to = topics[2].as_str().unwrap_or("").to_string();
 
-        transfers.push((idx as u32, token_address, from, to, amount));
+        let data = log["data"].as_str().unwrap_or("0x0");
+
+        let amount = u128::from_str_radix(
+            data.trim_start_matches("0x"),
+            16,
+        ).unwrap_or(0);
+
+        let token = log["address"].as_str().unwrap_or("").to_string();
+
+        result.push(TokenTransferRow {
+            tx_hash: tx_hash.to_string(),
+            block_number,
+            log_index: i as u32,
+            token_address: normalize_address(&token),
+            from_addr: normalize_address(&from),
+            to_addr: normalize_address(&to),
+            amount: amount.to_string(),
+        });
     }
 
-    transfers
+    result
 }
 
-/// پردازش یک تراکنش TRON
-pub async fn process_tx_tron(
+// -------------------------------------
+// Process single tx
+// -------------------------------------
+async fn process_tx(
     loader: Arc<LoaderTron>,
-    tx: Value,
+    tx: &serde_json::Value,
     block_number: u64,
-    block_timestamp: u64,
-) -> Result<()> {
+) -> Result<(TransactionRow, Vec<TokenTransferRow>)> {
 
-    let tx_hash = tx["txID"].as_str().unwrap_or("").to_string();
-    if tx_hash.is_empty() { return Ok(()); }
+    let raw = &tx["raw_data"]["contract"][0];
 
-    let contract = match tx["raw_data"]["contract"].get(0) {
-        Some(c) => c, None => return Ok(()),
+    let contract_type = raw["type"].as_str().unwrap_or("");
+
+    let parameter = &raw["parameter"]["value"];
+
+    let tx_hash = tx["txID"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing tx hash"))?
+        .to_string();
+
+    let mut from = "";
+    let mut to = "";
+    let mut amount: u128 = 0;
+
+    match contract_type {
+        "TransferContract" => {
+            from = parameter["owner_address"].as_str().unwrap_or("");
+            to = parameter["to_address"].as_str().unwrap_or("");
+            amount = parameter["amount"].as_u64().unwrap_or(0) as u128;
+        }
+
+        "TriggerSmartContract" => {
+            from = parameter["owner_address"].as_str().unwrap_or("");
+            to = parameter["contract_address"].as_str().unwrap_or("");
+        }
+
+        _ => {}
+    }
+
+    // receipt (rate limited)
+    let receipt = {
+        let _permit = loader.rpc_limiter.acquire().await?;
+        loader.tron_client.get_tx_receipt(&tx_hash).await?
     };
 
-    let contract_type = contract["type"].as_str().unwrap_or("");
-    let val = &contract["parameter"]["value"];
+    let token_transfers = extract_trc20_transfers(
+        &receipt,
+        block_number,
+        &tx_hash,
+    );
 
-    let from_addr = normalize_tron_address(val["owner_address"].as_str().unwrap_or("")).unwrap_or_default();
-    let to_addr   = normalize_tron_address(val["to_address"].as_str().unwrap_or("")).unwrap_or_default();
-    let amount    = val["amount"].as_u64().unwrap_or(0);
+    let tx_row = TransactionRow {
+        hash: tx_hash.clone(),
+        block_number,
+        from_addr: normalize_address(from),
+        to_addr: normalize_address(to),
+        value: amount.to_string(),
+        sensivity: calc_sensivity_tron(amount),
+    };
 
-    // دریافت receipt
-    let receipt = loader.tron_client.get_tx_receipt(&tx_hash).await?;
-
-    let energy_usage = receipt["receipt"]["energy_usage_total"].as_u64().unwrap_or(0);
-    let net_usage = receipt["receipt"]["net_usage"].as_u64().unwrap_or(0);
-    let fee = receipt["fee"].as_u64().unwrap_or(0);
-    let success = if receipt["receipt"]["result"].as_str() == Some("SUCCESS") { 1 } else { 0 };
-
-    // ذخیره TRX Transaction
-    if !from_addr.is_empty() && !to_addr.is_empty() {
-        save_tx(
-            loader.clickhouse.clone(),
-            tx_hash.clone(),
-            block_number,
-            from_addr.clone(),
-            to_addr.clone(),
-            amount.to_string(),
-            calc_sensivity_trx(amount),
-        ).await?;
-    }
-
-    // ذخیره TRC20 Transfers
-    let trc20_transfers = decode_trc20_from_receipt(&receipt);
-    for (_log_index, token, from, to, amt) in trc20_transfers {
-        save_token_transfer(
-            loader.clickhouse.clone(),
-            TokenTransferRow {
-                tx_hash: tx_hash.clone(),
-                log_index: 0,
-                block_number,
-                block_timestamp,
-                contract_address: token.clone(),
-                from_address: from.clone(),
-                to_address: to.clone(),
-                amount: amt.clone(),
-            }
-        ).await?;
-    }
-
-    // ذخیره Contract Calls
-    if contract_type == "TriggerSmartContract" {
-        let contract_address = normalize_tron_address(val["contract_address"].as_str().unwrap_or("")).unwrap_or_default();
-        let method_id = val["data"].as_str().unwrap_or("").chars().take(8).collect::<String>();
-
-        save_contract_call(
-            loader.clickhouse.clone(),
-            ContractCallRow {
-                tx_hash: tx_hash.clone(),
-                block_number,
-                block_timestamp,
-                caller_address: from_addr.clone(),
-                contract_address,
-                method_id,
-                call_value: val["call_value"].as_u64().unwrap_or(0),
-                success,
-            }
-        ).await?;
-    }
-
-    Ok(())
+    Ok((tx_row, token_transfers))
 }
 
-/// Fetch و پردازش بلاک‌ها
+// -------------------------------------
+// MAIN FETCH
+// -------------------------------------
 pub async fn fetch_tron(
     loader: Arc<LoaderTron>,
     start_block: u64,
     total_txs: u64,
 ) -> Result<()> {
 
-    let latest_block = loader.tron_client
-        .get_now_block()
-        .await?["block_header"]["raw_data"]["number"]
-        .as_u64()
-        .unwrap_or(start_block);
+    let tron = loader.tron_client.clone();
+    let clickhouse = loader.clickhouse.clone();
+
+    let latest_block = tron.get_block_number().await?;
+    println!("TRON Latest Block: {}", latest_block);
 
     let mut tx_count = 0;
     let mut current_block = start_block;
+    let mut last_synced_block = start_block;
 
-    while current_block <= latest_block && tx_count < total_txs {
-        let block = loader.tron_client.get_block(current_block).await?;
-        let txs = block["transactions"].as_array().cloned().unwrap_or_default();
+    // batching buffers
+    let mut tx_batch: Vec<TransactionRow> = vec![];
+    let mut transfer_batch: Vec<TokenTransferRow> = vec![];
+
+    const BATCH_SIZE: usize = 5000;
+
+    while current_block <= latest_block {
+
+        if tx_count >= total_txs {
+            break;
+        }
+
+        let block = {
+            let _permit = loader.rpc_limiter.acquire().await?;
+            tron.get_block(current_block).await?
+        };
+        
+        let txs: &[serde_json::Value] = block["transactions"]
+            .as_array()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
+        if txs.is_empty() {
+            last_synced_block = current_block;
+            save_sync_state(clickhouse.clone(), "tron", last_synced_block).await?;
+            current_block += 1;
+            continue;
+        }
 
         let mut tasks = FuturesUnordered::new();
 
         for tx in txs {
-            if tx_count >= total_txs { break; }
 
-            let loader_clone = loader.clone();
+            if tx_count >= total_txs {
+                break;
+            }
+
+            let loader = loader.clone();
+            let tx = tx.clone();
             let block_number = current_block;
-            let block_timestamp = block["block_header"]["raw_data"]["timestamp"].as_u64().unwrap_or(0);
 
             tasks.push(tokio::spawn(async move {
-                process_tx_tron(loader_clone, tx, block_number, block_timestamp).await
+                process_tx(loader, &tx, block_number).await
             }));
 
             tx_count += 1;
         }
 
-        while let Some(res) = tasks.next().await { res??; }
+        while let Some(res) = tasks.next().await {
+            let (tx_row, transfers) = res??;
 
-        save_sync_state(loader.clickhouse.clone(), "tron", current_block).await?;
+            tx_batch.push(tx_row);
+            transfer_batch.extend(transfers);
+
+            // flush batch
+            if tx_batch.len() >= BATCH_SIZE {
+
+                // insert tx batch
+                let mut insert_tx = clickhouse
+                    .insert::<TransactionRow>("transactions")
+                    .await?;
+
+                for row in tx_batch.drain(..) {
+                    insert_tx.write(&row).await?;
+                }
+
+                insert_tx.end().await?;
+
+                // insert transfers
+                if !transfer_batch.is_empty() {
+                    let mut insert_tr = clickhouse
+                        .insert::<TokenTransferRow>("token_transfers")
+                        .await?;
+
+                    for row in transfer_batch.drain(..) {
+                        insert_tr.write(&row).await?;
+                    }
+
+                    insert_tr.end().await?;
+                }
+
+                println!("[TRON] flushed batch");
+            }
+        }
+
+        last_synced_block = current_block;
+
+        save_sync_state(clickhouse.clone(), "tron", last_synced_block).await?;
+
+        println!(
+            "[TRON] synced block {} | total tx {}",
+            last_synced_block, tx_count
+        );
+
         current_block += 1;
     }
+
+    // final flush
+    if !tx_batch.is_empty() {
+        let mut insert_tx = clickhouse
+            .insert::<TransactionRow>("transactions")
+            .await?;
+
+        for row in tx_batch {
+            insert_tx.write(&row).await?;
+        }
+
+        insert_tx.end().await?;
+    }
+
+    if !transfer_batch.is_empty() {
+        let mut insert_tr = clickhouse
+            .insert::<TokenTransferRow>("token_transfers")
+            .await?;
+
+        for row in transfer_batch {
+            insert_tr.write(&row).await?;
+        }
+
+        insert_tr.end().await?;
+    }
+
+    save_sync_state(clickhouse.clone(), "tron", last_synced_block).await?;
+
+    println!("[TRON] Finished");
 
     Ok(())
 }

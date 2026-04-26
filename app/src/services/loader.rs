@@ -2,6 +2,7 @@ use clickhouse::Client;
 use ethers::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use anyhow::Result;
 
 use crate::helper::tron::TronClient;
 
@@ -97,7 +98,6 @@ impl LoaderBsc {
     }
 }
 
-
 pub struct LoaderTron {
     pub clickhouse: Arc<Client>,
     pub tron_client: Arc<TronClient>,
@@ -105,7 +105,8 @@ pub struct LoaderTron {
 }
 
 impl LoaderTron {
-    pub async fn new(config: &crate::config::AppConfig) -> anyhow::Result<Self> {
+    pub async fn new(config: &crate::config::AppConfig) -> Result<Self> {
+        // ClickHouse (tron_db)
         let clickhouse = Arc::new(
             Client::default()
                 .with_url(&config.clickhouse_url)
@@ -114,20 +115,23 @@ impl LoaderTron {
                 .with_database(&config.clickhouse_db_tron),
         );
 
+        // Tron RPC
         let tron_rpc_url = config
             .tron_rpc_url
             .as_ref()
-            .expect("TRON_RPC_HTTP must be set for tron mode");
+            .expect("TRON RPC must be set");
 
         let tron_client = Arc::new(
             TronClient::new(
                 tron_rpc_url,
                 config.tron_api_key.clone(),
-            )
+            )?
         );
 
-        let rpc_limiter =
-            Arc::new(Semaphore::new(config.rpc_max_concurrency));
+        // Rate limiter
+        let rpc_limiter = Arc::new(
+            Semaphore::new(config.rpc_max_concurrency)
+        );
 
         Ok(Self {
             clickhouse,
@@ -136,4 +140,3 @@ impl LoaderTron {
         })
     }
 }
-

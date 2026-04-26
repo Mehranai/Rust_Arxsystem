@@ -106,7 +106,7 @@ pub struct AppConfig {
 // Test
 impl AppConfig {
     pub fn from_env() -> Self {
-        let mode = AppMode::Tron;
+        let mode = AppMode::Eth;
         let sync_mode: SyncMode = SyncMode::Backfill;
         Self {
             mode,
@@ -121,7 +121,7 @@ impl AppConfig {
             clickhouse_db_tron:"tron_db".into(),
             
             //eth_rpc_url: Some("http://localhost:8545".into()),
-            eth_rpc_url: Some("https://rpc.ankr.com/eth/7e8ca9022eeddb398b8068455b3e3cabdafdf97d2d7ff977d85fb7915c192158".into()),
+            eth_rpc_url: Some("https://rpc.ankr.com/eth/a4ce905377a7aa94ded62bf6efb50b20acde76159d163f8de77a16ec6237137b".into()),
             btc_api_url: Some("https://blockstream.info/api".into()),
             bsc_rpc_url: Some("https://rpc.ankr.com/bsc/a4ce905377a7aa94ded62bf6efb50b20acde76159d163f8de77a16ec6237137b".into()),
             tron_rpc_url: Some("https://api.trongrid.io".into()),
