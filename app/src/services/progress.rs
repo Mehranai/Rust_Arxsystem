@@ -53,10 +53,9 @@ pub async fn save_wallet(
         return Ok(());
     }
 
-    // تشخیص نوع آدرس (wallet / exchange / contract)
     let wallet_type = detect_wallet_type(&clickhouse, addr, nonce, mwallet_type).await?;
 
-    // تعیین person_id
+    // person_id
     let person_id = match wallet_type.as_str() {
         "exchange" => format!("EXCHANGE_{}", addr), // entity مشترک
         _ => get_or_create_person_id(&clickhouse, addr).await?,
@@ -319,5 +318,5 @@ pub struct SimpleTransfer {
     pub token: String,
     pub from: String,
     pub to: String,
-    pub amount: u128, // 👈 بهتره numeric باشه
+    pub amount: u128, 
 }

@@ -5,15 +5,21 @@ use hex;
 pub fn hex_to_base58(hex_addr: &str) -> Option<String> {
     let cleaned = hex_addr.trim_start_matches("0x");
 
-    if cleaned.len() != 42 {
+    // handle padded topics (take last 42 chars)
+    let normalized = if cleaned.len() > 42 {
+        &cleaned[cleaned.len() - 42..]
+    } else {
+        cleaned
+    };
+
+    if normalized.len() != 42 {
         return None;
     }
 
-    let bytes = hex::decode(cleaned).ok()?;
+    let bytes = hex::decode(normalized).ok()?;
 
     let mut payload = bytes.clone();
 
-    // double SHA256
     let hash1 = Sha256::digest(&payload);
     let hash2 = Sha256::digest(&hash1);
 
@@ -43,15 +49,11 @@ pub fn normalize_tron_address(addr: &str) -> Option<String> {
         return None;
     }
 
-    // already Base58
+    // already base58
     if addr.starts_with('T') {
         return Some(addr.to_string());
     }
 
-    // hex format (41...)
-    if addr.starts_with("41") || addr.starts_with("0x41") {
-        return hex_to_base58(addr);
-    }
-
-    None
+    // try hex conversion (handles padded too)
+    hex_to_base58(addr)
 }

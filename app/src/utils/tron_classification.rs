@@ -20,7 +20,7 @@ pub fn compute_net_flows(
 
     for t in transfers {
 
-        let amount = t.amount as i128;
+        let amount = i128::try_from(t.amount).unwrap_or(i128::MAX);
 
         // from loses
         flows

@@ -4,11 +4,11 @@ use anyhow::{Result, anyhow};
 use futures::stream::{FuturesUnordered, StreamExt};
 
 use crate::services::loader::LoaderTron;
-use crate::services::progress::{
-    save_sync_state,
-};
+use crate::services::progress::save_sync_state;
 use crate::models::transaction::TransactionRow;
 use crate::models::token_transfer::TokenTransferRow;
+
+use crate::utils::tron_address::normalize_tron_address;
 
 const TRC20_TRANSFER_TOPIC: &str =
     "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -50,16 +50,11 @@ fn extract_trc20_transfers(
         .unwrap_or(&[]);
 
     for (i, log) in logs.iter().enumerate() {
-        let topics = log["topics"].as_array();
-        if topics.is_none() {
-            continue;
-        }
 
-        let topics = topics.unwrap();
-
-        if topics.len() < 3 {
-            continue;
-        }
+        let topics = match log["topics"].as_array() {
+            Some(t) if t.len() >= 3 => t,
+            _ => continue,
+        };
 
         let topic0 = topics[0].as_str().unwrap_or("");
 
@@ -67,8 +62,13 @@ fn extract_trc20_transfers(
             continue;
         }
 
-        let from = topics[1].as_str().unwrap_or("").to_string();
-        let to = topics[2].as_str().unwrap_or("").to_string();
+        let from = normalize_tron_address(
+            topics[1].as_str().unwrap_or("")
+        ).unwrap_or_default();
+
+        let to = normalize_tron_address(
+            topics[2].as_str().unwrap_or("")
+        ).unwrap_or_default();
 
         let data = log["data"].as_str().unwrap_or("0x0");
 
@@ -77,15 +77,17 @@ fn extract_trc20_transfers(
             16,
         ).unwrap_or(0);
 
-        let token = log["address"].as_str().unwrap_or("").to_string();
+        let token = normalize_tron_address(
+            log["address"].as_str().unwrap_or("")
+        ).unwrap_or_default();
 
         result.push(TokenTransferRow {
             tx_hash: tx_hash.to_string(),
             block_number,
             log_index: i as u32,
-            token_address: normalize_address(&token),
-            from_addr: normalize_address(&from),
-            to_addr: normalize_address(&to),
+            token_address: token,
+            from_addr: from,
+            to_addr: to,
             amount: amount.to_string(),
         });
     }
@@ -133,22 +135,27 @@ async fn process_tx(
     }
 
     // receipt (rate limited)
-    let receipt = {
-        let _permit = loader.rpc_limiter.acquire().await?;
-        loader.tron_client.get_tx_receipt(&tx_hash).await?
-    };
+    let mut token_transfers = vec![];
 
-    let token_transfers = extract_trc20_transfers(
-        &receipt,
-        block_number,
-        &tx_hash,
-    );
+    if contract_type == "TriggerSmartContract" {
+
+        let receipt = {
+            let _permit = loader.rpc_limiter.acquire().await?;
+            loader.tron_client.get_tx_receipt(&tx_hash).await?
+        };
+
+        token_transfers = extract_trc20_transfers(
+            &receipt,
+            block_number,
+            &tx_hash,
+        );
+    }
 
     let tx_row = TransactionRow {
         hash: tx_hash.clone(),
         block_number,
-        from_addr: normalize_address(from),
-        to_addr: normalize_address(to),
+        from_addr: normalize_tron_address(from).unwrap_or_default(),
+        to_addr: normalize_tron_address(to).unwrap_or_default(),
         value: amount.to_string(),
         sensivity: calc_sensivity_tron(amount),
     };
@@ -191,7 +198,7 @@ pub async fn fetch_tron(
             let _permit = loader.rpc_limiter.acquire().await?;
             tron.get_block(current_block).await?
         };
-        
+
         let txs: &[serde_json::Value] = block["transactions"]
             .as_array()
             .map(|v| v.as_slice())
